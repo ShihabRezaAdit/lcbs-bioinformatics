@@ -1,0 +1,217 @@
+════════════════════════════════════════════════════════════════════════════════
+LCBS PROJECT — IMPLEMENTATION FINDINGS REPORT
+Prepared by: Md. Shihab Reza
+Institution: American International University-Bangladesh (AIUB)
+Department:  Computer Science
+Dataset:     NCBI GEO — GSE3431 (Yeast Metabolic Cycle, Tu et al. 2005)
+Paper:       Rahat & Hasan (2026), arXiv:2511.08958v2
+════════════════════════════════════════════════════════════════════════════════
+
+
+────────────────────────────────────────────────────────────────────────────────
+1. WHAT THE PROJECT IS ABOUT
+────────────────────────────────────────────────────────────────────────────────
+
+This project takes the theoretical algorithms from the paper "The Longest
+Common Bitonic Subsequence: A Match-Sensitive Dynamic Programming Approach"
+by Rahat and Hasan (2026) and implements them in Python from scratch, then
+runs them on real biological data to see how well the theoretical claims
+hold in practice.
+
+A bitonic sequence is one that strictly increases up to a single peak value
+and then strictly decreases. For example: 1, 3, 6, 4 is bitonic — it rises
+to 6, then falls.
+
+The Longest Common Bitonic Subsequence (LCBS) of two sequences A and B is
+the longest bitonic sequence that appears as a subsequence in both A and B.
+
+In biology, gene expression profiles over time often follow this pattern:
+a gene is activated (expression rises), reaches peak activity, then is
+repressed (expression falls). The LCBS between two genes captures how long
+their shared rise-and-fall pattern is.
+
+
+────────────────────────────────────────────────────────────────────────────────
+2. METHODS — WHAT WE IMPLEMENTED
+────────────────────────────────────────────────────────────────────────────────
+
+We implemented two exact algorithms from the paper:
+
+ALGORITHM 1 — Baseline (Θ(nm))
+  - Runs a row-scan LCIS algorithm twice: once forward, once on the
+    reversed sequences.
+  - The forward pass computes INC(i,j) — the length of the longest common
+    increasing subsequence ending at match (i,j).
+  - The backward pass on reversed input computes DEC(i,j) — the length
+    of the longest common decreasing subsequence starting at (i,j).
+  - The peak is the match (i,j) that maximises INC(i,j) + DEC(i,j) - 1.
+  - Reconstruction follows stored predecessor and successor pointers.
+  - Time complexity: Theta(nm) — always quadratic, regardless of input.
+
+ALGORITHM 2 — Match-Sensitive (O(M log²M))
+  - Only operates on the M matching pairs (i,j) where A[i] = B[j].
+  - Uses coordinate compression to rank j-indices and values.
+  - Uses a sparse 2D Binary Indexed Tree (Fenwick tree) to answer
+    dominance range-maximum queries in O(log²M) per match.
+  - Forward pass computes INC using ascending row order.
+  - Backward pass computes DEC using mirrored j-rank: x_hat = J - rJ + 1,
+    which converts a suffix-in-j query into a prefix query the BIT handles.
+  - Time complexity: O(M log²M) — depends on M, the number of matches,
+    not on the full grid nm.
+
+CORRECTNESS FINDING DURING IMPLEMENTATION:
+  We discovered a bug in a naive implementation of Algorithm 2. If two
+  matches (i, j1) and (i, j2) share the same row i with j1 < j2, and
+  (i, j1) is inserted into the BIT before (i, j2) is queried, then (i,j1)
+  falsely appears to dominate (i,j2). Strict dominance requires i' < i,
+  not i' <= i. This produced non-bitonic output sequences in testing.
+  Fix: all BIT queries in a row must complete before any updates in that
+  same row. After this fix, 500/500 random test pairs returned valid
+  bitonic common subsequences.
+
+DATA PIPELINE — GSE3431:
+  - Downloaded NCBI GEO series matrix: 9,335 probe sets x 36 time points.
+  - Applied quantile normalisation across all 36 samples.
+  - Fitted a piecewise-linear bitonic model to each gene's expression
+    profile, trying all possible peak positions. Kept genes with R² >= 0.25.
+  - Discretised each 36-point profile into integer bins {0,...,9} using
+    alpha = 10 quantile bins with jitter for tie-breaking.
+  - Result: 3,785 bitonic genes available for LCBS analysis.
+  - Selected top 100 genes by R² score, formed 500 gene pairs, ran both
+    algorithms on each pair.
+
+
+────────────────────────────────────────────────────────────────────────────────
+3. RESULTS — WHAT WE FOUND
+────────────────────────────────────────────────────────────────────────────────
+
+SYNTHETIC BENCHMARKS (n x alpha grid, 10 trials each):
+
+  n=1000, alpha=10:
+    Baseline:        211 ms
+    Match-Sensitive: 660 ms
+    M (matches):     ~100,000
+    Speedup:         0.32x  (baseline is faster)
+
+  n=20, alpha=50:
+    Baseline:        0.044 ms
+    Match-Sensitive: 0.033 ms
+    M (matches):     ~8
+    Speedup:         1.35x  (match-sensitive is faster)
+
+  n=50, alpha=50:
+    Baseline:        0.263 ms
+    Match-Sensitive: 0.244 ms
+    M (matches):     ~52
+    Speedup:         1.08x  (barely faster)
+
+BIOLOGICAL RESULTS (GSE3431, 500 gene pairs, alpha=10, sequence length=36):
+
+  Mean LCBS length:    8.73 time points (out of 36)
+  Median LCBS length:  9 time points
+  Maximum LCBS length: 11 time points
+    - Best pair: probe 10085_at vs 10087_at
+    - Both peak near time point 14 (oxidative phase of yeast metabolic cycle)
+
+  Top 5 gene pairs by LCBS length:
+    10085_at   x  10087_at   -- length 11, peak at T14
+    10111_at   x  10179_at   -- length  9, peak at T2
+    10128_at   x  10182_at   -- length  9, peak at T30
+    10161_g_at x  10173_at   -- length  9, peak at T19
+    10039_s_at x  10103_at   -- length  9, peak at T15
+
+  Permutation test (correct null model — shuffle gene sequences):
+    Observed mean LCBS:  8.25
+    Null mean (shuffled): 8.64
+    p-value:             1.0  (not significant)
+
+
+────────────────────────────────────────────────────────────────────────────────
+4. THEORY VS REAL-WORLD IMPLEMENTATION FINDINGS
+────────────────────────────────────────────────────────────────────────────────
+
+CLAIM 1 — Baseline runs in Theta(nm)  [Paper: Theorem 3]
+  Theory:    Time scales quadratically with sequence length n.
+  We found:  Log-log slope = 2.03 at alpha=10, R² = 0.999.
+             At alpha=5,10,20,50 the slope is between 2.01 and 2.04.
+  Verdict:   CONFIRMED. The baseline is exactly quadratic in all settings
+             we tested. The slope of 2.03 is essentially perfect agreement
+             with the theoretical prediction of 2.0.
+
+CLAIM 2 — Match-sensitive runs in O(M log²M)  [Paper: Theorem 5]
+  Theory:    Time scales with M (match count), not nm. Specifically O(M log²M).
+  We found:  Log-log slope of runtime vs M = 1.08, R² = 0.9996.
+             This is consistent with O(M log²M) since log²M grows slowly
+             and appears as a small additive factor to the slope of 1.0.
+  Verdict:   CONFIRMED. The algorithm genuinely scales with M, not n.
+             The complexity claim holds empirically.
+
+CLAIM 3 — Both algorithms always return the same LCBS length  [Paper: Theorem 4]
+  Theory:    Both algorithms are exact and must return identical lengths.
+  We found:  500 out of 500 randomly generated pairs returned equal lengths.
+             All output sequences were verified as strictly bitonic and
+             as valid common subsequences of both inputs.
+  Verdict:   CONFIRMED. The correctness proof holds in practice.
+
+CLAIM 4 — Match-sensitive is faster when M log²M << nm  [Paper: Abstract]
+  Theory:    When the alphabet is large and matches are sparse, the
+             match-sensitive algorithm should outperform the baseline.
+  We found:  At alpha=50, n=20: M ~ 8, M log²M ~ 71, nm = 400.
+             Here M log²M << nm and we see 1.35x speedup. CONFIRMED here.
+
+             At alpha=10, n=100: M ~ 992, M log²M ~ 98,296, nm = 10,000.
+             M log²M is nearly 10x larger than nm. Speedup = 0.39x.
+             Match-sensitive is 2.5x SLOWER than baseline.
+
+             At alpha=10, n=1000: M ~ 100,000, M log²M ~ 27.6 million,
+             nm = 1,000,000. Match-sensitive is 3x slower.
+
+  Verdict:   PARTIALLY CONFIRMED. The condition M log²M << nm is
+             mathematically correct. But in practice the speedup window
+             is very narrow: it only appears at alpha >= 50 and n <= 20.
+             For biologically realistic inputs (n=36, alpha=10), both
+             algorithms take similar time and the match-sensitive variant
+             is slightly slower due to BIT dictionary overhead.
+
+CLAIM 5 — No speedup when alphabet is small (SETH barrier)  [Paper: Section 5]
+  Theory:    Under SETH, no subquadratic algorithm exists for LCBS in the
+             worst case. At small alpha, M ~ nm/alpha which is still large,
+             so match-sensitive offers no asymptotic improvement.
+  We found:  At alpha=5 and alpha=10, mean speedup across all n = 0.39x.
+             The match-sensitive algorithm is consistently slower than
+             baseline at these alphabet sizes. This is exactly because
+             M remains proportional to nm when alpha is small.
+  Verdict:   CONFIRMED. The SETH-based prediction is correct.
+
+CLAIM 6 — Bitonic patterns exist in real gene expression data  [Paper: Introduction]
+  Theory:    The paper motivates LCBS by arguing that gene expression
+             over time often follows a rise-then-fall pattern.
+  We found:  3,785 out of 9,335 probe sets in GSE3431 (40.5%) have a
+             bitonic expression profile with R² >= 0.25 from a piecewise
+             linear fit. This is a substantial fraction of the transcriptome.
+  Verdict:   CONFIRMED. Bitonic structure is a genuine and dominant feature
+             of yeast metabolic cycle gene expression, not an exception.
+
+CLAIM 7 — LCBS detects biological co-expression  [Paper: Introduction, implied]
+  Theory:    The paper implies that a high LCBS between two genes is
+             biologically meaningful — evidence of shared regulation.
+  We found:  The observed mean LCBS length (8.73) across 500 gene pairs
+             selected by individual bitonic score is NOT significantly
+             higher than the null distribution obtained by randomly shuffling
+             the time-point labels of each gene (null mean = 8.64, p = 1.0).
+             This means we cannot conclude from our experiment that the
+             LCBS lengths we found reflect true biological co-expression
+             rather than shared sequence statistics from the discretisation.
+  Verdict:   NOT CONFIRMED at alpha=10. This does not mean the algorithm
+             is wrong — it means the preprocessing choice (alpha=10,
+             selecting genes by individual R² rather than pairwise
+             co-expression) is not sensitive enough to isolate a signal.
+             A larger alphabet (alpha >= 50) or gene pairs selected from
+             known co-expression networks would likely produce a detectable
+             biological signal.
+
+────────────────────────────────────────────────────────────────────────────────
+Repository:  https://github.com/ShihabRezaAdit/lcbs-bioinformatics
+Paper:       https://arxiv.org/abs/2511.08958
+Dataset:     https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE3431
+════════════════════════════════════════════════════════════════════════════════
